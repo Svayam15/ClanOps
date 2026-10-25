@@ -331,7 +331,7 @@ async def api(clan_tag, path, retries=3):
     for attempt in range(retries + 1):
         try:
             async with HTTP.get(url, headers={"Authorization": f"Bearer {CR_API_KEY}"}) as r:
-                if r.status in (429, 500, 502, 503, 504) and attempt < retries:
+                if r.status in (429, 500, 502, 503, 504, 520, 521, 522, 523, 524, 525, 526, 527) and attempt < retries:
                     try:
                         wait = float(r.headers.get("Retry-After", ""))
                     except ValueError:
