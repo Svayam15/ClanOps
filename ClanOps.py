@@ -1096,6 +1096,38 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
     except discord.HTTPException:
         pass
 
+CONFIRM_TIMEOUT_SECONDS = 60
+
+
+class ConfirmView(discord.ui.View):
+    """Confirm / Cancel buttons. Only the person who ran the command can press them."""
+
+    def __init__(self, user_id: int, confirm_label: str = "Yes, continue"):
+        super().__init__(timeout=CONFIRM_TIMEOUT_SECONDS)
+        self.user_id = user_id
+        self.value: Optional[bool] = None
+        self.confirm.label = confirm_label
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message(
+                "Only the person who ran this command can answer.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Yes, continue", style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.value = True
+        await interaction.response.edit_message(
+            embed=base_embed("⏳ Working…", "Confirmed. Applying the change now.", COLOR_WARN), view=None)
+        self.stop()
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.value = False
+        await interaction.response.edit_message(
+            embed=base_embed("❎ Cancelled", "Nothing was changed.", COLOR_WARN), view=None)
+        self.stop()
 
 # ================= COMMANDS =================
 
