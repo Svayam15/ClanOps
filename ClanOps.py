@@ -1886,5 +1886,159 @@ async def playerperformance(interaction: discord.Interaction, player: str):
         f"📋 {match['name']} ({ROLE_TEXT[match['role']]}) — {match['tag']}", clip(desc)))
 
 
+@bot.tree.command(name="me", description="Show your own clan stats (you must be linked to a player).")
+@app_commands.guild_only()
+async def me_cmd(interaction: discord.Interaction):
+    """Everything the bot knows about the person who runs it. Private reply, linked members only, no verdict."""
+    await interaction.response.defer(ephemeral=True)
+    gid = interaction.guild.id
+    clan = get_clan_tag(gid)
+    if not clan:
+        return await interaction.followup.send(embed=base_embed(
+            "⚠️ Not set up", "The server owner needs to run `/setup` first.", COLOR_WARN), ephemeral=True)
+
+    link = get_link(gid, interaction.user.id)
+    if not link:
+        return await interaction.followup.send(embed=base_embed(
+            "🔗 You're not linked yet",
+            "I don't know which player is yours. Ask the server owner or a clan Leader to link you with "
+            "`/link user:@you player_tag:#YOURTAG`.", COLOR_WARN), ephemeral=True)
+    tag, saved_name = link
+
+    members = await api(clan, "/members")
+    m = next((x for x in members["items"] if x["tag"] == tag), None)
+    if m is None:
+        return await interaction.followup.send(embed=base_embed(
+            "🚪 Not in the clan",
+            f"**{saved_name}** ({tag}) is no longer in the clan, so there are no live stats to show.",
+            COLOR_WARN), ephemeral=True)
+
+    today = datetime.now(IST).date()
+    now = datetime.now(timezone.utc)
+    soft_errors = (aiohttp.ClientError, asyncio.TimeoutError, KeyError, TypeError)  # optional sections never break /me
+
+    # ---- profile ----
+    hours = max(int((now - parse_seen(m["lastSeen"])).total_seconds() // 3600), 0)
+    if hours < 1:
+        seen = "less than an hour ago"
+    elif hours < 24:
+        seen = f"{hours}h ago"
+    else:
+        seen = f"{hours // 24}d {hours % 24}h ago"
+    role = m["role"]
+    profile = (f"Role: {ROLE_ICON.get(role, '')} {ROLE_TEXT.get(role, role)}\n"
+               f"Trophies: {m.get('trophies', 0):,}\n"
+               f"Last seen: {seen}")
+
+    # ---- time in clan ----
+    summ = stay_summary(load_stays(gid).get(tag, []), today)
+    if not summ["has"]:
+        tenure = "Not tracked yet."
+    else:
+        tenure = f"In the clan since {summ['since']} ({fmt_days(summ['current'])})"
+        if summ["before"] > 0 or summ["gap"] is not None:
+            tenure += f"\nBefore that: {fmt_days(summ['before'])}"
+            if summ["gap"] is not None:
+                tenure += f" · away {fmt_days(summ['gap'])}"
+        if summ["baseline"]:
+            tenure += "\n_Counted from when ClanOps started tracking._"
+
+    # ---- donations ----
+    gave, got = m["donations"], m.get("donationsReceived", 0)
+    if gave == 0 and got == 0:
+        dcat = "⚪ nothing yet"
+    elif got == 0:
+        dcat = "🟢 Generous"
+    elif gave / got >= 1.5:
+        dcat = "🟢 Generous"
+    elif gave / got >= 0.5:
+        dcat = "🟡 Balanced"
+    else:
+        dcat = "🔴 Taker"
+    with dbc() as c:
+        weeks = c.execute("SELECT week_end, donated, received FROM weekly_donations "
+                          "WHERE guild_id = ? AND tag = ? ORDER BY week_end DESC LIMIT 4", (gid, tag)).fetchall()
+        daily = c.execute("SELECT date, decks_used, medals, donations, donations_received, trophies "
+                          "FROM daily_history WHERE guild_id = ? AND tag = ? ORDER BY date DESC LIMIT 14",
+                          (gid, tag)).fetchall()
+        events = c.execute("SELECT event, old_role, new_role, changed_at FROM role_history "
+                           "WHERE guild_id = ? AND tag = ? ORDER BY changed_at DESC, id DESC LIMIT 8",
+                           (gid, tag)).fetchall()
+    donations = f"This week: gave {gave:,} / got {got:,} — {dcat}"
+    if weeks:
+        donations += "\n" + "\n".join(f"Week ending {w}: gave {d:,} / got {r:,}" for w, d, r in weeks)
+
+    # ---- current war ----
+    try:
+        race = await api(clan, "/currentriverrace")
+        if str(race.get("periodType", "")).lower() == "training":
+            war_now = "Training days: there are no war decks to play right now."
+        else:
+            p = next((x for x in race["clan"]["participants"] if x["tag"] == tag), None)
+            if p:
+                war_now = (f"Decks today: {p['decksUsedToday']}/4\nDecks this war: {p['decksUsed']}\n"
+                           f"Medals this war: {p['fame']:,}")
+            else:
+                war_now = "No decks played yet in this war."
+    except soft_errors:
+        war_now = "Couldn't load this right now."
+
+    # ---- last 4 finished wars ----
+    try:
+        race_log = await api(clan, "/riverracelog")
+        wars = race_log["items"][:4]
+        war_lines, total_decks, total_medals = [], 0, 0
+        for i, race_item in enumerate(wars):
+            decks = medals = 0
+            for st in race_item["standings"]:
+                if st["clan"]["tag"].replace("#", "") == clan:
+                    for p in st["clan"]["participants"]:
+                        if p["tag"] == tag:
+                            decks, medals = p["decksUsed"], p["fame"]
+            total_decks += decks
+            total_medals += medals
+            war_lines.append(f"War {i + 1}{' (latest)' if i == 0 else ''}: {decks}/16 decks · {medals:,} medals")
+        if not wars:
+            history = "No finished wars yet."
+        else:
+            max_decks = 16 * len(wars)
+            pct = total_decks / max_decks * 100
+            is_new = summ["has"] and not summ["baseline"] and summ["current"] < 7 * len(wars)
+            if is_new:
+                rating = "🆕 new member, so no rating yet"
+            elif pct >= 70:
+                rating = "🟢 Excellent"
+            elif pct >= 40:
+                rating = "🟡 Okay"
+            else:
+                rating = "🔴 Bad"
+            history = ("\n".join(war_lines)
+                       + f"\nTotal: {total_decks}/{max_decks} decks ({pct:.0f}%) · {total_medals:,} medals · {rating}")
+    except soft_errors:
+        history = "Couldn't load this right now."
+
+    # ---- recent days and role history (from the bot's own records) ----
+    recent = ("\n".join(f"{d} — {dk} decks, {md} medals, {dn} given / {rc} got, {tr}🏆"
+                        for d, dk, md, dn, rc, tr in daily)
+              if daily else "No daily stats recorded yet. The bot saves one every day.")
+    role_lines = []
+    for event, old_role, new_role, changed_at in events:
+        if event == "joined":
+            role_lines.append(f"{changed_at} — Joined as {new_role}")
+        else:
+            role_lines.append(f"{changed_at} — {'⬆️' if event == 'promoted' else '⬇️'} {old_role} → {new_role}")
+    role_hist = "\n".join(role_lines) if role_lines else "No recorded changes yet."
+
+    e = base_embed(f"🙋 {m['name']} — {tag}", "Only you can see this.")
+    for name, value in (("🏷️ Profile", profile), ("⏳ Time in clan", tenure), ("🎁 Donations", donations),
+                        ("⚔️ Current war", war_now), ("📜 Last wars", history),
+                        ("📅 Recent days", recent), ("🔁 Role history", role_hist)):
+        e.add_field(name=name, value=clip(value, 1000), inline=False)
+    await interaction.followup.send(embed=e, ephemeral=True)
+
+
+
+
+
 if __name__ == "__main__":
     bot.run(DISCORD_TOKEN)
