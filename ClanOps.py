@@ -1071,7 +1071,7 @@ async def on_member_remove(member: discord.Member):
 async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
     original = getattr(error, "original", error)
     name = getattr(interaction.command, "name", "?")
-    log.error("Error in /%s: %r", name, original, exc_info=original)
+    log.error("Error in /%s: %s", name, original, exc_info=original)
 
     if isinstance(original, aiohttp.ClientResponseError):
         if original.status == 404:
