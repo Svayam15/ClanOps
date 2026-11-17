@@ -1148,6 +1148,30 @@ async def setup_cmd(interaction: discord.Interaction, clan_tag: str, log_channel
     old_cfg = get_config(gid)
     same_clan = bool(old_cfg and old_cfg[0] == tag)
 
+    if old_cfg and not same_clan:
+        # switching clans deletes this server's stored data, so make the owner confirm first
+        view = ConfirmView(interaction.user.id, confirm_label="Yes, switch clan and delete data")
+        prompt = base_embed(
+            "⚠️ Switch to a different clan?",
+            f"This server is currently set up for **#{old_cfg[0]}**.\n"
+            f"You are switching to **{info['name']}** (#{tag}).\n\n"
+            "Switching **permanently deletes** this server's stored data: member history, join dates, "
+            "role history, daily and weekly stats, Discord links and open flags.\n\n"
+            "If you only wanted to change the channels, run `/setup` again with the **same** clan tag; "
+            "that keeps everything.\n\n"
+            f"Press a button within {CONFIRM_TIMEOUT_SECONDS} seconds.", COLOR_ALERT)
+        msg = await interaction.followup.send(embed=prompt, view=view, wait=True)
+        await view.wait()
+        if view.value is not True:
+            if view.value is None:  # timed out: the buttons are still on the message, so remove them
+                try:
+                    await msg.edit(embed=base_embed(
+                        "⌛ Timed out", "No answer, so nothing was changed. Run `/setup` again if you still want to switch.",
+                        COLOR_WARN), view=None)
+                except discord.HTTPException:
+                    pass
+            return
+
     with dbc() as c:
         if old_cfg and not same_clan:
             # switching clans: forget the old clan's data so history doesn't get mixed up
@@ -1318,7 +1342,8 @@ async def unlink_cmd(interaction: discord.Interaction, user: discord.Member):
 @app_commands.choices(
     action=[app_commands.Choice(name="Add", value="add"), app_commands.Choice(name="Remove", value="remove"),
             app_commands.Choice(name="List", value="list")],
-    command=[app_commands.Choice(name=c, value=c) for c in GRANTABLE])
+    command=[app_commands.Choice(name="all (every command)", value="all")]
+            + [app_commands.Choice(name=c, value=c) for c in GRANTABLE])
 async def grant_cmd(interaction: discord.Interaction, action: app_commands.Choice[str],
                     command: Optional[app_commands.Choice[str]] = None,
                     user: Optional[discord.Member] = None, role: Optional[discord.Role] = None):
@@ -1329,24 +1354,37 @@ async def grant_cmd(interaction: discord.Interaction, action: app_commands.Choic
 
     if action.value == "list":
         with dbc() as c:
-            rows = c.execute("SELECT command, kind, target_id FROM grants WHERE guild_id = ? ORDER BY command", (gid,)).fetchall()
+            rows = c.execute("SELECT kind, target_id, command FROM grants WHERE guild_id = ? "
+                             "ORDER BY kind, target_id", (gid,)).fetchall()
         if not rows:
             return await interaction.followup.send(embed=base_embed("🔑 Grants", "Nothing granted yet. Only the owner and the clan Leader can use the commands."), ephemeral=True)
-        lines = [f"`/{cmd}` → {'<@' + str(tid) + '>' if kind == 'user' else '<@&' + str(tid) + '>'}" for cmd, kind, tid in rows]
+        by_target = {}  # one line per user / role, not one line per command
+        for kind, tid, cmd in rows:
+            by_target.setdefault((kind, tid), set()).add(cmd)
+        lines = []
+        for (kind, tid), cmds in by_target.items():
+            who = f"<@{tid}>" if kind == "user" else f"<@&{tid}>"
+            what = "all commands" if set(GRANTABLE) <= cmds else ", ".join(f"`/{c}`" for c in GRANTABLE if c in cmds)
+            lines.append(f"{who} → {what}")
         return await interaction.followup.send(embed=base_embed("🔑 Grants", clip("\n".join(lines))), ephemeral=True)
 
     if command is None or (user is None and role is None):
         return await interaction.followup.send(embed=base_embed(
             "⚠️ Missing options", "Pick a `command` and a `user` or a `role`.", COLOR_WARN), ephemeral=True)
     kind, target = ("user", user) if user is not None else ("role", role)
+    every = command.value == "all"
     with dbc() as c:
         if action.value == "add":
-            c.execute("INSERT OR IGNORE INTO grants VALUES (?, ?, ?, ?)", (gid, kind, target.id, command.value))
+            c.executemany("INSERT OR IGNORE INTO grants VALUES (?, ?, ?, ?)",
+                          [(gid, kind, target.id, x) for x in (GRANTABLE if every else [command.value])])
+        elif every:
+            c.execute("DELETE FROM grants WHERE guild_id = ? AND kind = ? AND target_id = ?", (gid, kind, target.id))
         else:
             c.execute("DELETE FROM grants WHERE guild_id = ? AND kind = ? AND target_id = ? AND command = ?",
                       (gid, kind, target.id, command.value))
     verb = "can now use" if action.value == "add" else "can no longer use"
-    await interaction.followup.send(embed=base_embed("🔑 Updated", f"{target.mention} {verb} `/{command.value}`."), ephemeral=True)
+    what = "**all** grantable commands" if every else f"`/{command.value}`"
+    await interaction.followup.send(embed=base_embed("🔑 Updated", f"{target.mention} {verb} {what}."), ephemeral=True)
 
 
 @bot.tree.command(name="currentriverrace", description="Show live war standings.")
